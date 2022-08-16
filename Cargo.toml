@@ -1,5 +1,5 @@
 [package]
-name = "actix_working"
+name = "actor-ping"
 version = "0.1.0"
 edition = "2021"
 

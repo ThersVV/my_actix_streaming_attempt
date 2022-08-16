@@ -1,9 +1,12 @@
 use actix_web::web::BytesMut;
-use actix_web::{http, web, App, Error, HttpResponse, HttpServer, Result, Route};
-use futures::{future::ok, stream::once};
+use actix_web::{
+    body::MessageBody, error, http, web, App, Error, HttpResponse, HttpServer, Result, Route,
+};
+use futures::channel::mpsc;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
+use std::thread;
 
 pub static LIST: &[u8; 4] = b"LIST";
 struct AppState {
@@ -15,11 +18,19 @@ async fn gettin(path: web::Path<String>, data: web::Data<AppState>) -> HttpRespo
     let database: MutexGuard<HashMap<String, BytesMut>> = data.database.lock().unwrap();
 
     if let Some(entry) = database.get(&id) {
-        let body = once(ok::<_, Error>(web::Bytes::from(entry.to_owned())));
+        let (tx, rx_body) = mpsc::unbounded();
+        thread::spawn(move || loop {
+            let _ = tx.unbounded_send(
+                entry
+                    .clone()
+                    .try_into_bytes()
+                    .map_err(|_| error::ContentTypeError::ParseError),
+            );
+        });
 
         HttpResponse::Ok()
             .insert_header(("Transfer-encoding", "chunked"))
-            .streaming(body)
+            .streaming(rx_body)
     } else {
         HttpResponse::NotFound().body(format!("Key {id} was not found."))
     }
@@ -44,9 +55,13 @@ async fn puttin(
     match database.get(&path) {
         None => {
             database.insert(path.clone(), BytesMut::new());
-            let entry = database.get_mut(&path).unwrap();
+            std::mem::drop(database);
             while let Some(bytes) = body.next().await {
+                // probably illegal mutex manipulation, I need to read it while changing it tho
+                let mut database = data.database.lock().expect("Mutex panicked.");
+                let entry = database.get_mut(&path).unwrap();
                 entry.extend_from_slice(&bytes?);
+                std::mem::drop(database);
             }
             Ok(HttpResponse::Ok().body("Data were succesfully put."))
         }
